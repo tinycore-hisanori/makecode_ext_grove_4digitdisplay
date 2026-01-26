@@ -1,107 +1,87 @@
+// Grove 4-Digit Display (TM1637) driver for micro:bit MakeCode
+// Uses 2 pins: CLK and DIO (not I2C)
+
 namespace grove4digit {
     //% color=#D81B60 icon="\uf26c"
     //% block="Grove 4-Digit Display"
     //% block.loc.ja="Grove 4桁7セグ"
-    export class TM1637 {
-        private clk: DigitalPin
-        private dio: DigitalPin
-        private brightness: number = 7 // 0..7
-        private enabled: boolean = true
+    export namespace tm1637 {
+        let _inited = false
+        let _clk: DigitalPin
+        let _dio: DigitalPin
+        let _brightness = 7 // 0..7
+        let _enabled = true
 
-        constructor(clk: DigitalPin, dio: DigitalPin) {
-            this.clk = clk
-            this.dio = dio
-            pins.setPull(this.clk, PinPullMode.PullUp)
-            pins.setPull(this.dio, PinPullMode.PullUp)
-            pins.digitalWritePin(this.clk, 1)
-            pins.digitalWritePin(this.dio, 1)
-            this.setBrightness(7, true)
-            this.clear()
+        function delay() { control.waitMicros(5) }
+
+        function start() {
+            pins.digitalWritePin(_dio, 1)
+            pins.digitalWritePin(_clk, 1)
+            delay()
+            pins.digitalWritePin(_dio, 0)
+            delay()
+            pins.digitalWritePin(_clk, 0)
         }
 
-        private delay() {
-            control.waitMicros(5)
+        function stop() {
+            pins.digitalWritePin(_clk, 0)
+            delay()
+            pins.digitalWritePin(_dio, 0)
+            delay()
+            pins.digitalWritePin(_clk, 1)
+            delay()
+            pins.digitalWritePin(_dio, 1)
+            delay()
         }
 
-        private start() {
-            pins.digitalWritePin(this.dio, 1)
-            pins.digitalWritePin(this.clk, 1)
-            this.delay()
-            pins.digitalWritePin(this.dio, 0)
-            this.delay()
-            pins.digitalWritePin(this.clk, 0)
-        }
-
-        private stop() {
-            pins.digitalWritePin(this.clk, 0)
-            this.delay()
-            pins.digitalWritePin(this.dio, 0)
-            this.delay()
-            pins.digitalWritePin(this.clk, 1)
-            this.delay()
-            pins.digitalWritePin(this.dio, 1)
-            this.delay()
-        }
-
-        private writeByte(b: number): boolean {
-            // LSB first
+        // TM1637: LSB-first
+        function writeByte(b: number): boolean {
             for (let i = 0; i < 8; i++) {
-                pins.digitalWritePin(this.clk, 0)
-                this.delay()
-                pins.digitalWritePin(this.dio, (b & 0x01) ? 1 : 0)
-                this.delay()
-                pins.digitalWritePin(this.clk, 1)
-                this.delay()
+                pins.digitalWritePin(_clk, 0)
+                delay()
+                pins.digitalWritePin(_dio, (b & 0x01) ? 1 : 0)
+                delay()
+                pins.digitalWritePin(_clk, 1)
+                delay()
                 b >>= 1
             }
 
             // ACK
-            pins.digitalWritePin(this.clk, 0)
-            pins.digitalWritePin(this.dio, 1) // release
-            this.delay()
-            pins.digitalWritePin(this.clk, 1)
-            this.delay()
-            const ack = (pins.digitalReadPin(this.dio) === 0)
-            pins.digitalWritePin(this.clk, 0)
-            this.delay()
+            pins.digitalWritePin(_clk, 0)
+            pins.digitalWritePin(_dio, 1) // release
+            delay()
+            pins.digitalWritePin(_clk, 1)
+            delay()
+            const ack = (pins.digitalReadPin(_dio) === 0)
+            pins.digitalWritePin(_clk, 0)
+            delay()
             return ack
         }
 
-        private command(cmd: number) {
-            this.start()
-            this.writeByte(cmd & 0xFF)
-            this.stop()
+        function command(cmd: number) {
+            start()
+            writeByte(cmd & 0xFF)
+            stop()
         }
 
-        private setData(address: number, data: number) {
-            // 0xC0 + addr
-            this.start()
-            this.writeByte(0xC0 | (address & 0x03))
-            this.writeByte(data & 0xFF)
-            this.stop()
+        function setData(address: number, data: number) {
+            start()
+            writeByte(0xC0 | (address & 0x03))
+            writeByte(data & 0xFF)
+            stop()
         }
 
-        private encodeDigit(d: number): number {
-            // segments: 0b0GFEDCBA (typical TM1637 mapping)
-            // 0-9
+        function encodeDigit(d: number): number {
+            // segments: 0b0GFEDCBA
             const table = [
-                0x3f, // 0
-                0x06, // 1
-                0x5b, // 2
-                0x4f, // 3
-                0x66, // 4
-                0x6d, // 5
-                0x7d, // 6
-                0x07, // 7
-                0x7f, // 8
-                0x6f  // 9
+                0x3f, 0x06, 0x5b, 0x4f, 0x66,
+                0x6d, 0x7d, 0x07, 0x7f, 0x6f
             ]
             if (d >= 0 && d <= 9) return table[d]
             return 0x00
         }
 
-        private encodeChar(ch: string): number {
-            // minimal set (you can add more later)
+        function encodeChar(ch: string): number {
             switch (ch) {
                 case " ": return 0x00
                 case "-": return 0x40
@@ -124,51 +104,77 @@ namespace grove4digit {
             }
         }
 
+        function applyBrightness() {
+            // display control: 0x88 + (ON?0x08:0) + brightness(0..7)
+            command(0x88 | (_enabled ? 0x08 : 0x00) | (_brightness & 0x07))
+        }
+
         /**
-         * Set brightness (0..7) and power on/off.
-         * %param level brightness 0..7
-         * %param on true = display on
+         * Initialize TM1637 4-digit display with pins.
+         * @param clk CLK pin
+         * @param dio DIO pin
          */
-        //% block="set brightness %level on %on"
+        //% block="init 4-digit display clk %clk dio %dio"
+        //% block.loc.ja="4桁7セグ初期化 clk %clk dio %dio"
+        //% jsdoc.loc.ja="TM1637方式の4桁7セグを初期化します（2ピン: CLK/DIO）。"
+        //% clk.fieldEditor="gridpicker" clk.fieldOptions.columns=4
+        //% dio.fieldEditor="gridpicker" dio.fieldOptions.columns=4
+        export function init(clk: DigitalPin, dio: DigitalPin) {
+            _clk = clk
+            _dio = dio
+            _inited = true
+
+            pins.setPull(_clk, PinPullMode.PullUp)
+            pins.setPull(_dio, PinPullMode.PullUp)
+            pins.digitalWritePin(_clk, 1)
+            pins.digitalWritePin(_dio, 1)
+
+            _brightness = 7
+            _enabled = true
+            applyBrightness()
+            clear()
+        }
+
+        /**
+         * Set brightness (0..7) and display on/off.
+         */
+        //% block="set brightness %level display on %on"
         //% block.loc.ja="明るさ %level 表示ON %on"
         //% jsdoc.loc.ja="明るさ(0〜7)と表示ON/OFFを設定します。"
         //% level.min=0 level.max=7
         //% on.defl=true
-        export setBrightness(level: number, on: boolean = true) {
-            this.brightness = Math.max(0, Math.min(7, level | 0))
-            this.enabled = !!on
-            // display control command: 0x88 + brightness, bit3 is ON
-            this.command(0x88 | (this.enabled ? 0x08 : 0x00) | (this.brightness & 0x07))
+        export function setBrightness(level: number, on: boolean = true) {
+            if (!_inited) return
+            _brightness = Math.max(0, Math.min(7, level | 0))
+            _enabled = !!on
+            applyBrightness()
         }
 
         /**
          * Clear all digits.
          */
-        //% block="clear"
-        //% block.loc.ja="クリア"
+        //% block="clear display"
+        //% block.loc.ja="表示クリア"
         //% jsdoc.loc.ja="4桁を消灯します。"
-        export clear() {
-            // set auto-increment mode
-            this.command(0x40)
-            for (let i = 0; i < 4; i++) this.setData(i, 0x00)
-            this.setBrightness(this.brightness, this.enabled)
+        export function clear() {
+            if (!_inited) return
+            command(0x40) // auto-increment mode
+            for (let i = 0; i < 4; i++) setData(i, 0x00)
+            applyBrightness()
         }
 
         /**
-         * Display a number (-999..9999).
-         * %param value number
-         * %param leadingZero show leading zeros
+         * Show a number (-999..9999).
          */
         //% block="show number %value leadingZero %leadingZero"
         //% block.loc.ja="数字表示 %value 0埋め %leadingZero"
         //% jsdoc.loc.ja="数値を表示します（-999〜9999）。"
         //% leadingZero.defl=false
-        export showNumber(value: number, leadingZero: boolean = false) {
+        export function showNumber(value: number, leadingZero: boolean = false) {
+            if (!_inited) return
             let v = value | 0
             let neg = false
             if (v < 0) { neg = true; v = -v }
-
-            // limit
             if (v > 9999) v = 9999
 
             const d0 = (v / 1000) | 0
@@ -176,102 +182,90 @@ namespace grove4digit {
             const d2 = ((v / 10) | 0) % 10
             const d3 = v % 10
 
-            const out = [0, 0, 0, 0]
-            out[0] = this.encodeDigit(d0)
-            out[1] = this.encodeDigit(d1)
-            out[2] = this.encodeDigit(d2)
-            out[3] = this.encodeDigit(d3)
+            let o0 = encodeDigit(d0)
+            let o1 = encodeDigit(d1)
+            let o2 = encodeDigit(d2)
+            let o3 = encodeDigit(d3)
 
             if (!leadingZero) {
-                if (d0 === 0) out[0] = 0
-                if (d0 === 0 && d1 === 0) out[1] = 0
-                if (d0 === 0 && d1 === 0 && d2 === 0) out[2] = 0
+                if (d0 === 0) o0 = 0
+                if (d0 === 0 && d1 === 0) o1 = 0
+                if (d0 === 0 && d1 === 0 && d2 === 0) o2 = 0
             }
 
             if (neg) {
-                // put '-' on leftmost available
-                if (out[0] === 0) out[0] = 0x40
-                else if (out[1] === 0) out[1] = 0x40
-                else if (out[2] === 0) out[2] = 0x40
-                else out[0] = 0x40
+                // put '-' to the leftmost blank if possible
+                if (o0 === 0) o0 = 0x40
+                else if (o1 === 0) o1 = 0x40
+                else if (o2 === 0) o2 = 0x40
+                else o0 = 0x40
             }
 
-            this.showRaw(out[0], out[1], out[2], out[3])
+            showRaw(o0, o1, o2, o3)
         }
 
         /**
-         * Display time as MM:SS (colon on).
+         * Show time as MM:SS (colon on).
          */
         //% block="show time mm %mm ss %ss"
         //% block.loc.ja="時刻表示 分 %mm 秒 %ss"
         //% jsdoc.loc.ja="MM:SS形式で表示します（中央のコロン点灯）。"
         //% mm.min=0 mm.max=99
         //% ss.min=0 ss.max=59
-        export showTime(mm: number, ss: number) {
+        export function showTime(mm: number, ss: number) {
+            if (!_inited) return
             const m = Math.max(0, Math.min(99, mm | 0))
             const s = Math.max(0, Math.min(59, ss | 0))
+
             const m1 = (m / 10) | 0
             const m2 = m % 10
             const s1 = (s / 10) | 0
             const s2 = s % 10
-            // colon is typically bit 0x80 on digit1 (2nd digit)
-            const d0 = this.encodeDigit(m1)
-            const d1 = this.encodeDigit(m2) | 0x80
-            const d2 = this.encodeDigit(s1)
-            const d3 = this.encodeDigit(s2)
-            this.showRaw(d0, d1, d2, d3)
+
+            const o0 = encodeDigit(m1)
+            const o1 = encodeDigit(m2) | 0x80 // colon (typical)
+            const o2 = encodeDigit(s1)
+            const o3 = encodeDigit(s2)
+
+            showRaw(o0, o1, o2, o3)
         }
 
         /**
-         * Display 4 raw segment bytes.
-         * Each byte: 0b0GFEDCBA (plus 0x80 for colon on digit 2).
+         * Show raw segment bytes (0b0GFEDCBA). Use 0x80 for colon on digit2.
          */
         //% block="show raw d0 %d0 d1 %d1 d2 %d2 d3 %d3"
         //% block.loc.ja="生セグ表示 d0 %d0 d1 %d1 d2 %d2 d3 %d3"
         //% jsdoc.loc.ja="セグメントの生データ(4バイト)で表示します。"
-        export showRaw(d0: number, d1: number, d2: number, d3: number) {
-            // auto-increment
-            this.command(0x40)
-            this.setData(0, d0)
-            this.setData(1, d1)
-            this.setData(2, d2)
-            this.setData(3, d3)
-            this.setBrightness(this.brightness, this.enabled)
+        export function showRaw(d0: number, d1: number, d2: number, d3: number) {
+            if (!_inited) return
+            command(0x40) // auto-increment
+            setData(0, d0)
+            setData(1, d1)
+            setData(2, d2)
+            setData(3, d3)
+            applyBrightness()
         }
 
         /**
-         * Display 4 characters (best effort).
-         * Supported: 0-9, A-F, -, _, space, some letters.
+         * Show up to 4 characters (best effort).
          */
         //% block="show text %text"
         //% block.loc.ja="文字表示 %text"
         //% jsdoc.loc.ja="4文字を表示します（対応文字のみ、足りない分は空白）。"
-        export showText(text: string) {
+        export function showText(text: string) {
+            if (!_inited) return
             const t = (text || "")
             const c0 = t.length > 0 ? t.charAt(0) : " "
             const c1 = t.length > 1 ? t.charAt(1) : " "
             const c2 = t.length > 2 ? t.charAt(2) : " "
             const c3 = t.length > 3 ? t.charAt(3) : " "
-            const d0 = this.isDigit(c0) ? this.encodeDigit(parseInt(c0)) : this.encodeChar(c0)
-            const d1 = this.isDigit(c1) ? this.encodeDigit(parseInt(c1)) : this.encodeChar(c1)
-            const d2 = this.isDigit(c2) ? this.encodeDigit(parseInt(c2)) : this.encodeChar(c2)
-            const d3 = this.isDigit(c3) ? this.encodeDigit(parseInt(c3)) : this.encodeChar(c3)
-            this.showRaw(d0, d1, d2, d3)
-        }
 
-        private isDigit(c: string): boolean {
-            return c >= "0" && c <= "9"
-        }
-    }
+            const d0 = (c0 >= "0" && c0 <= "9") ? encodeDigit(parseInt(c0)) : encodeChar(c0)
+            const d1 = (c1 >= "0" && c1 <= "9") ? encodeDigit(parseInt(c1)) : encodeChar(c1)
+            const d2 = (c2 >= "0" && c2 <= "9") ? encodeDigit(parseInt(c2)) : encodeChar(c2)
+            const d3 = (c3 >= "0" && c3 <= "9") ? encodeDigit(parseInt(c3)) : encodeChar(c3)
 
-    /**
-     * Create a Grove 4-Digit Display (TM1637).
-     * Uses 2 pins: CLK and DIO.
-     */
-    //% block="create 4-digit display clk %clk dio %dio"
-    //% block.loc.ja="4桁7セグ作成 clk %clk dio %dio"
-    //% jsdoc.loc.ja="TM1637方式の4桁7セグを作成します（2ピン: CLK/DIO）。"
-    export function create(clk: DigitalPin, dio: DigitalPin): TM1637 {
-        return new TM1637(clk, dio)
+            showRaw(d0, d1, d2, d3)
+        }
     }
 }
