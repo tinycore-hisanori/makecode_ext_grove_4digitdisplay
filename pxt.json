@@ -1,0 +1,12 @@
+{
+  "name": "pxt-grove-4digit-display",
+  "version": "0.0.1",
+  "description": "Grove 4-Digit Display (TM1637) for micro:bit MakeCode",
+  "license": "MIT",
+  "dependencies": {
+    "core": "*"
+  },
+  "files": [
+    "main.ts"
+  ]
+}
