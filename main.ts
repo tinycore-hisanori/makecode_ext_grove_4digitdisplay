@@ -1,188 +1,246 @@
 /**
- * Grove LED Bar (MY9221) driver for micro:bit MakeCode
- *
- * Protocol is implemented by bit-banging DATA/CLOCK like Seeed Arduino library.
+ * Grove 4-Digit Display (TM1637) - MakeCode for micro:bit
+ * Block-friendly (init with pins), and API names close to Seeed:
+ *   init(clk,dio), set(brightness), point(onoff), display(...), clearDisplay()
  */
 
-//% color=#00BFA5 icon="\uf012" block="Grove LED Bar"
-namespace groveLedBar {
-    let _inited = false
-    let _clk: DigitalPin
-    let _dat: DigitalPin
-    let _reverse = false
+namespace grove4DigitDisplay {
+    //% color=#D81B60 icon="\uf26c"
+    //% block="Grove 4-Digit Display"
+    //% block.loc.ja="Grove 4桁7セグ"
+    export namespace TM1637 {
+        // ---- constants (Seeed-like) ----
+        export const BRIGHT_DARKEST = 0
+        export const BRIGHT_TYPICAL = 2
+        export const BRIGHTEST = 7
 
-    // MY9221 wants 12x16bit words for LED bar (10 used + padding).
-    // Each LED word is 8-bit PWM-ish pattern (0x00..0xFF) sent as 16-bit value in the Arduino lib.
-    let _led: number[] = [0,0,0,0,0,0,0,0,0,0] // 10 segments
+        export const POINT_OFF = 0
+        export const POINT_ON = 1
 
-    function clamp(v: number, lo: number, hi: number) {
-        if (v < lo) return lo
-        if (v > hi) return hi
-        return v
-    }
+        // ---- internal state ----
+        let _inited = false
+        let _clk: DigitalPin
+        let _dio: DigitalPin
 
+        let cmd_set_data = 0x40
+        let cmd_set_addr = 0xC0
+        let cmd_disp_ctrl = 0x8A // ON + BRIGHT_TYPICAL(2)
 
-     function send16(word: number) {
-        // Arduino reference shifts out MSB first across 16 cycles. :contentReference[oaicite:2]{index=2}
-        word &= 0xFFFF
-        let clkState = 0
-        for (let i = 0; i < 16; i++) {
-            const bit = (word & 0x8000) !== 0
-            pins.digitalWritePin(_dat, bit ? 1 : 0)
-            pins.digitalWritePin(_clk, clkState)
+        let _point = false
 
-            if(clkState == 0){
-               clkState = 1
-            } else {
-               clkState = 0
+        // 0..9,A,b,C,d,E,F  (0..15)
+        const tubeTab: number[] = [
+            0x3f, 0x06, 0x5b, 0x4f, 0x66,
+            0x6d, 0x7d, 0x07, 0x7f, 0x6f,
+            0x77, 0x7c, 0x39, 0x5e, 0x79,
+            0x71
+        ]
+
+        function delay() { control.waitMicros(5) }
+
+        function start() {
+            pins.digitalWritePin(_dio, 1)
+            pins.digitalWritePin(_clk, 1)
+            delay()
+            pins.digitalWritePin(_dio, 0)
+            pins.digitalWritePin(_clk, 0)
+            delay()
+        }
+
+        function stop() {
+            pins.digitalWritePin(_clk, 0)
+            pins.digitalWritePin(_dio, 0)
+            delay()
+            pins.digitalWritePin(_clk, 1)
+            pins.digitalWritePin(_dio, 1)
+            delay()
+        }
+
+        function writeByte(data: number) {
+            // TM1637: LSB first
+            for (let i = 0; i < 8; i++) {
+                pins.digitalWritePin(_clk, 0)
+                delay()
+                pins.digitalWritePin(_dio, (data & 0x01) ? 1 : 0)
+                delay()
+                pins.digitalWritePin(_clk, 1)
+                delay()
+                data >>= 1
             }
 
-            word = (word << 1) & 0xFFFF
-        }
-    }
-
-
-    function latch() {
-        // Mirrors the latch sequence in the Seeed Arduino lib. :contentReference[oaicite:3]{index=3}
-        pins.digitalWritePin(_dat, 0)
-
-        // clock pulses
-        pins.digitalWritePin(_clk, 1)
-        pins.digitalWritePin(_clk, 0)
-        pins.digitalWritePin(_clk, 1)
-        pins.digitalWritePin(_clk, 0)
-
-        control.waitMicros(240)
-
-        // data toggles (4 times)
-        for (let i = 0; i < 4; i++) {
-            pins.digitalWritePin(_dat, 1)
-            pins.digitalWritePin(_dat, 0)
+            // ACK (module pulls DIO low). We don't hard-fail if not seen.
+            pins.digitalWritePin(_clk, 0)
+            pins.digitalWritePin(_dio, 1) // release
+            delay()
+            pins.digitalWritePin(_clk, 1)
+            delay()
+            // optional ack read:
+            // const ack = (pins.digitalReadPin(_dio) === 0)
+            pins.digitalWritePin(_clk, 0)
+            delay()
         }
 
-        control.waitMicros(1)
-
-        pins.digitalWritePin(_clk, 1)
-        pins.digitalWritePin(_clk, 0)
-    }
-
-    function flush() {
-        if (!_inited) return
-
-        // cmd word first (0x0000) :contentReference[oaicite:4]{index=4}
-        send16(0x0000)
-
-        // send 10 LED words + padding to 12
-        if (_reverse) {
-            for (let i = 9; i >= 0; i--) send16(_led[i] & 0xFF)
-        } else {
-            for (let i = 0; i < 10; i++) send16(_led[i] & 0xFF)
+        function writeCmd(cmd: number) {
+            start()
+            writeByte(cmd & 0xFF)
+            stop()
         }
-        send16(0x0000)
-        send16(0x0000)
 
-        latch()
-    }
-
-    /**
-     * Initialize Grove LED Bar.
-     * @param clockPin CLOCK pin
-     * @param dataPin DATA pin
-     * @param greenToRed true: green->red direction
-     */
-    //% block="init Grove LED Bar clock %clockPin data %dataPin greenToRed %greenToRed"
-    //% block.loc.ja="LEDバー初期化 クロック端子(CLK1) %clockPin 、データ端子(D1) %dataPin 向き(緑→赤) %greenToRed"
-    //% jsdoc.loc.ja="Grove LEDバーを初期化します。CLOCKピンとDATAピンを指定します。"
-    //% clockPin.loc.ja="クロックピン"
-    //% dataPin.loc.ja="データピン"
-    //% greenToRed.loc.ja="表示方向（緑→赤）"
-    export function init(clockPin: DigitalPin, dataPin: DigitalPin, greenToRed: boolean = false) {
-        _clk = clockPin
-        _dat = dataPin
-        _reverse = greenToRed
-        _inited = true
-
-        pins.digitalWritePin(_clk, 0)
-        pins.digitalWritePin(_dat, 0)
-
-        for (let i = 0; i < 10; i++) _led[i] = 0
-        flush()
-    }
-
-    /**
-     * Set display direction.
-     */
-    //% block="set direction greenToRed %greenToRed"
-    export function setGreenToRed(greenToRed: boolean) {
-        _reverse = greenToRed
-        flush()
-    }
-
-    /**
-     * Set bar level (0..10).
-     */
-    //% block="set level %level"
-    //% block.loc.ja="LEDバーのレベル値 %level"
-    //% jsdoc.loc.ja="Grove LEDバーのレベル値をセットします(0-10)"
-    //% level.loc.ja="レベル値"
-    export function setLevel(level: number) {
-        if (!_inited) return
-        level = clamp(level, 0, 10)
-
-        // Arduino lib uses 8 noticeable brightness steps per segment. :contentReference[oaicite:5]{index=5}
-        let x = level * 8.0
-
-        for (let i = 0; i < 10; i++) {
-            let v = 0
-            if (x >= 8) v = 0xFF
-            else if (x > 0) {
-                // e.g. x=1..7 => 0b00000001..0b01111111
-                const n = clamp(Math.floor(x), 0, 8)
-                v = (1 << n) - 1
-            } else v = 0
-
-            _led[i] = v & 0xFF
-            x -= 8.0
+        function setData(addr: number, data: number) {
+            start()
+            writeByte(cmd_set_addr | (addr & 0x03))
+            writeByte(data & 0xFF)
+            stop()
         }
-        flush()
-    }
 
-    /**
-     * Set one LED (1..10) brightness 0..1.
-     */
-    //% block="set LED %index brightness %brightness"
-    export function setLed(index: number, brightness: number) {
-        if (!_inited) return
-        index = clamp(index, 1, 10)
-        brightness = clamp(brightness, 0, 1)
-
-        const steps = clamp(Math.floor(brightness * 8), 0, 8)
-        const v = steps === 0 ? 0 : (1 << steps) - 1
-        _led[index - 1] = v & 0xFF
-
-        flush()
-    }
-
-    /**
-     * Set LEDs by 10-bit mask (bit0 = LED1).
-     */
-    //% block="set bits %mask"
-    export function setBits(mask: number) {
-        if (!_inited) return
-        mask = mask | 0
-        for (let i = 0; i < 10; i++) {
-            _led[i] = (mask & (1 << i)) ? 0xFF : 0x00
+        function applyPoint(buf: number[]) {
+            if (_point) {
+                // typical: colon is bit7 on digit1 (2nd digit)
+                buf[1] = (buf[1] | 0x80) & 0xFF
+            }
         }
-        flush()
-    }
 
-    /**
-     * Clear all LEDs.
-     */
-    //% block="clear"
-    export function clear() {
-        if (!_inited) return
-        for (let i = 0; i < 10; i++) _led[i] = 0
-        flush()
+        function encodeDigit(d: number): number {
+            if (d < 0 || d > 15) return 0x00
+            return tubeTab[d] & 0xFF
+        }
+
+        function encodeNumber(n: number): number[] {
+            // Seeed互換っぽく：右寄せ、先頭は空白、負数は左に'-'
+            let v = n | 0
+            if (v > 9999) v = 9999
+            if (v < -999) v = -999
+
+            const out = [0x00, 0x00, 0x00, 0x00]
+
+            if (v < 0) {
+                const abs = (-v) | 0
+                out[0] = 0x40 // '-'
+                const s = abs.toString()
+                // 右寄せで残り3桁に詰める
+                for (let i = 0; i < s.length && i < 3; i++) {
+                    const ch = s.charAt(s.length - 1 - i)
+                    out[3 - i] = encodeDigit(parseInt(ch))
+                }
+                return out
+            }
+
+            const s = v.toString()
+            for (let i = 0; i < s.length && i < 4; i++) {
+                const ch = s.charAt(s.length - 1 - i)
+                out[3 - i] = encodeDigit(parseInt(ch))
+            }
+            return out
+        }
+
+        function displayRaw(buf: number[]) {
+            // auto-increment
+            writeCmd(cmd_set_data)
+            for (let i = 0; i < 4; i++) setData(i, buf[i] & 0xFF)
+            // display control
+            writeCmd(cmd_disp_ctrl)
+        }
+
+        /**
+         * Initialize display with CLK/DIO pins.
+         * @param clk CLK pin
+         * @param dio DIO pin
+         */
+        //% block="init 4-digit display clk %clk dio %dio"
+        //% block.loc.ja="4桁7セグ初期化 clk %clk dio %dio"
+        //% jsdoc.loc.ja="CLK/DIOピンを指定して初期化します。"
+        //% clk.fieldEditor="gridpicker" clk.fieldOptions.columns=4
+        //% dio.fieldEditor="gridpicker" dio.fieldOptions.columns=4
+        export function init(clk: DigitalPin, dio: DigitalPin) {
+            _clk = clk
+            _dio = dio
+            _inited = true
+
+            pins.setPull(_clk, PinPullMode.PullUp)
+            pins.setPull(_dio, PinPullMode.PullUp)
+            pins.digitalWritePin(_clk, 1)
+            pins.digitalWritePin(_dio, 1)
+
+            // default like Seeed
+            set(BRIGHT_TYPICAL)
+            clearDisplay()
+        }
+
+        /**
+         * Set brightness (0..7).
+         * @param brightness 0..7
+         */
+        //% block="set brightness %brightness"
+        //% block.loc.ja="明るさ設定 %brightness"
+        //% jsdoc.loc.ja="明るさを設定します（0〜7）。"
+        //% brightness.min=0 brightness.max=7
+        export function set(brightness: number) {
+            if (!_inited) return
+            let b = brightness | 0
+            if (b < 0) b = 0
+            if (b > 7) b = 7
+            // 0x88 = display ON, low 3 bits = brightness
+            cmd_disp_ctrl = 0x88 | b
+            writeCmd(cmd_disp_ctrl)
+        }
+
+        /**
+         * Turn colon/point on/off.
+         * @param onoff POINT_ON / POINT_OFF
+         */
+        //% block="point %onoff"
+        //% block.loc.ja="コロン %onoff"
+        //% jsdoc.loc.ja="中央のコロンをON/OFFします（POINT_ON / POINT_OFF）。"
+        export function point(onoff: number) {
+            if (!_inited) return
+            _point = (onoff === POINT_ON)
+        }
+
+        /**
+         * Clear display.
+         */
+        //% block="clear display"
+        //% block.loc.ja="表示クリア"
+        //% jsdoc.loc.ja="表示を消去します。"
+        export function clearDisplay() {
+            if (!_inited) return
+            displayRaw([0x00, 0x00, 0x00, 0x00])
+        }
+
+        /**
+         * Display a number (right aligned).
+         * @param value number
+         */
+        //% block="display number %value"
+        //% block.loc.ja="数字表示 %value"
+        //% jsdoc.loc.ja="数値を表示します（右寄せ）。"
+        export function displayNumber(value: number) {
+            if (!_inited) return
+            const buf = encodeNumber(value)
+            applyPoint(buf)
+            displayRaw(buf)
+        }
+
+        /**
+         * Display digit at position (0..3), digit 0..15 (0-9,A-F).
+         * @param position 0..3
+         * @param digit 0..15
+         */
+        //% block="display pos %position digit %digit"
+        //% block.loc.ja="位置 %position に表示 digit %digit"
+        //% jsdoc.loc.ja="指定位置(0〜3)に1桁表示します。digitは0〜15（0-9,A-F）。"
+        //% position.min=0 position.max=3
+        //% digit.min=0 digit.max=15
+        export function display(position: number, digit: number) {
+            if (!_inited) return
+            let pos = position | 0
+            if (pos < 0) pos = 0
+            if (pos > 3) pos = 3
+
+            const buf = [0x00, 0x00, 0x00, 0x00]
+            buf[pos] = encodeDigit(digit)
+            applyPoint(buf)
+            displayRaw(buf)
+        }
     }
 }
